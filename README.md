@@ -12,3 +12,6 @@ There are three sets of parameters which can be found in the first section of th
 - Fixed parameters S-1 --> These are set to classify the SAR images. Default values are already defined.
 
 The fixed parameters could be tuned to achieve a better classification. More details about their purpose can be found within the paper. 
+
+
+HAVE FUN!
