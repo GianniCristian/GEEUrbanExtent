@@ -1,0 +1,747 @@
+// ============================================================================================== //
+//      Urban extent extraction combining Sentinel data in the optical and microwave range        //
+// ============================================================================================== //
+
+var ROI = /* color: #d63000 */ee.Geometry.Polygon(
+        [[[-42.84042443392906, -23.081443899147512],
+          [-42.88437634569436, -22.518017522469133],
+          [-43.804585338184665, -22.564952753643794],
+          [-43.910342496959004, -23.14334124547527]]]),
+          
+shapes = ee.FeatureCollection("ft:1rYMVQMw3hTr8IC2d3Ad8nHzHmQy8iBJCqAN20l_O"),
+cities_table = ee.FeatureCollection("ft:1pQ-PrIEGrYa2Y3v9tsN1xwfYuqRIqOoDPARgpwzS"),
+countries = ee.FeatureCollection("ft:1tdSwUL7MVpOauSgRzqVTOwdfy17KDbw-1d9omPw");
+
+// ====================================== //
+/***       Parameters to be set         ***/
+// ====================================== //
+var polygon_area = ROI;  //Region of interest
+
+var area = "South South America";     // The name of the region in "Global Shape" Fusion Table:
+                                      //   North America, Center South America, 
+                                      //   North South America, South South America,
+                                      //   Europe, North Africa, Center South Africa, 
+                                      //   Center Africa, Souht Africa Oceania
+                                      //   Russia Japan, Center Asia, India, South Est Asia
+                                      //   Indonesia, Indochina
+
+var country_name =  "Brazil";         // The name of selected country in Google "Countries of the World" table 
+                                      // (set "" if you want to use the entire area instead of this country alone)
+
+var province_name = "";               // Select province of Indonesia or China
+                                      // (set "" if you want to use the entire Indonesia or China). Do not use for other countries!
+
+var start_date = "2016-04-22";        // S2 - Starting day of the collection
+var end_date = "2016-04-26";          // S2 - Ending day of the collection
+
+var ndsv_feature_res = 10;            // [10,20]: 10 corresponds to 4 bands, hence 6 NDSV features; 20 corresponds to 10 bands, hence 45 NDSV features
+
+// Choose the city or the cities to use
+var selectedCities = cities_table.filter(ee.Filter.eq('MAIN_CITY', 'Kunming')); // use this line only if there is one city!
+/*var selectedCities = cities_table.filter(ee.Filter.or(ee.Filter.eq('MAIN_CITY', 'Kunming'), // use this command lines if there are more then one city
+                                                      ee.Filter.eq('MAIN_CITY', 'Yuxi'),
+                                                      ee.Filter.eq('MAIN_CITY', 'Qujing')));*/
+
+var use_all_cities = true;            // Set true to use all the cities of the current provice 
+                                      // instead of the selected ones
+
+var S1_start_date = '2016-01-01'      // S1 - Starting day of the collection
+var S1_end_date = '2017-01-01'        // S1 - Ending day of the collection
+var lee_filter = 0;                   // Refined Lee speckle filter as coded in the SNAP 3.0 S1TBX. 1 -> Apply
+var orbit = 'DESCENDING'              // 'ASCENDING'
+var polar = 'VV'                      // Polarization
+
+var zoom = 11;                        // level of zoom (center_on automatically set zoom) 
+var center_on = "";                   // Name of city on which center the zoom
+                                      // (set "" if you want to zoom on entire area)
+
+// ====================================== //
+//           Fixed parameters S-2         //
+// ====================================== //
+
+var sensor = "S2";                    // S2
+var collection_type = "greenest";     // Type of collection
+var waterfilter = true;               // Enable/disable water filter in classification  
+
+// Random points training set
+var num_points = 10000;               // Num points to generate
+var classifiers = new Array(5);       // Classifier: 
+                                      //    0 = "FastNaiveBayes"
+                                      //    1 = "GmoMaxEnt" 
+                                      //    2 = "Winnow"
+                                      //    3 = "MultiClassPerceptron"
+                                      //    4 = "Pegasos"
+                                      //    5 = "Cart"
+                                      //    6 = "RifleSerialClassifier" (aka Random Forest)
+                                      //    7 = "IKPamir"
+                                      //    8 = "VotingSvm"
+                                      //    9 = "MarginSvm"
+
+// ====================================== //
+//           Fixed parameters S-1         //
+// ====================================== //
+
+var treshold_dr = -2.5;               // Threshold to identify the seeds. 
+var treshold_ws = 1500;               // Threshold for the watershed algorithm
+var kernel_dr = 60;                   // In meters 
+var maxDistance_Cost = 30 * 100;      // In meters
+var treshold_slope = 20;              // Slope value used to mask mountains
+var kernel_dr_open = 30;              // In meters
+var kernel_dr_close = 30;             // In meters
+
+
+// ====================================== //
+/***          Loading basic data        ***/
+// ====================================== //
+
+// LOAD POLYGONS
+// Find area in the world
+var shapes = ee.FeatureCollection("ft:1rYMVQMw3hTr8IC2d3Ad8nHzHmQy8iBJCqAN20l_O");
+var filter = shapes.filter(ee.Filter.eq('Area', area));
+
+// Find Countries in the world
+var countries = ee.FeatureCollection('ft:1tdSwUL7MVpOauSgRzqVTOwdfy17KDbw-1d9omPw');
+var country = countries.filter(ee.Filter.eq('Country', country_name));
+
+// Find provinces in the selected country
+var province = "";
+var provinces_table = "";
+if(country_name === "Indonesia")
+{
+  // Find province of Indonesia
+  provinces_table = ee.FeatureCollection('ft:1ep1h4bOMUOEg0jwjmmn78T-L32zLbILZotS2lwUC');
+  province = provinces_table.filter(ee.Filter.eq('name', province_name));
+}
+else if(country_name === "China")
+{
+  // Find Province of China
+  provinces_table = ee.FeatureCollection('ft:1h7DGU8yXMYqULLM3F4AsvLPOXiR5WTRswSgWLeHH');
+  province = provinces_table.filter(ee.Filter.eq('NAME_1', province_name));
+}
+
+// Load main polygon
+var polygon1 = polygon_area;
+
+// Classifier types
+var classifier_array = [ee.Classifier.naiveBayes(), ee.Classifier.gmoMaxEnt(), ee.Classifier.winnow(), 
+                        ee.Classifier.perceptron(), ee.Classifier.pegasosLinear(),
+                        ee.Classifier.cart(), ee.Classifier.randomForest(),
+                        ee.Classifier.ikpamir(), ee.Classifier.svm(), ee.Classifier.svm("Margin")];
+
+// Classifier names
+var classifier_names = ["NaiveBayes", "GmoMaxEnt", "Winnow", "MultiClassPerceptron", "PegasosLinear",
+                         "Cart", "RandomForest", "IKPamir", "Svm", "MarginSvm"];
+
+if(use_all_cities === true)
+{
+  var allCities = cities_table.filter(ee.Filter.eq('COUNTRY', country_name));
+  var allProvinceCities = allCities.map(function(f) {
+      return f.set("Inside",
+          ee.Algorithms.If((f.geometry()).containedIn(polygon1), true, false));
+  });
+  selectedCities = allProvinceCities.filterMetadata('Inside', 'equals', true);
+}
+
+// Color palette for classification
+var palette_list = new Array( {palette: '000000, ff0000'},
+                              {palette: '000000, ffff00'});
+
+
+// ====================================== //
+/***          General Functions         ***/
+// ====================================== //
+
+// Autocenter map
+function autoCenterMap(polygon, zoom)
+{                                
+  var centroid = polygon.centroid().getInfo().coordinates;
+  
+  Map.setCenter(centroid[0],centroid[1],zoom);
+}
+
+// Add NDVI band
+function addNdvi_S2(img) {
+      var nd = img.normalizedDifference(['B8', 'B4']);
+      return img.addBands(nd.rename('NDVI'));
+    }
+
+// Return an image in flag is 0 or the median of a collection if flag is 1
+function input_selector(start_date, end_date, polygon)
+{
+
+  var coll;
+  coll = ee.ImageCollection("COPERNICUS/S2").filterDate(new Date(start_date), new Date(end_date)).filterBounds(polygon);
+  print (coll)
+  var s2 = coll.select(['B1','B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12']);
+  var ndvi = s2.map(addNdvi_S2);
+  var greenest = ndvi.qualityMosaic('NDVI');
+  
+  return ee.Image(greenest).clip(polygon);
+
+}
+
+// ====================================== //
+//               NDSV Functions           //
+// ====================================== //
+
+// NDSV computing
+function NDSV(image, b1, b2)
+{
+
+  return image.expression(
+    '((b(\"' + b2 + '\") - b(\"' + b1 + '\")) / (b(\"' + b2 + '\") + b(\"'+ b1 + '\"))) ');
+}
+
+// Compute all the 10/20m bands of NDSV for Sentinel-2
+function create_ndsv_img_45_S2(image)
+{
+  image = image.float();
+  
+  var band_2_3_image = NDSV(image,'B2','B3');
+  var band_2_4_image = NDSV(image,'B2','B4');
+  var band_2_5_image = NDSV(image,'B2','B5');
+  var band_2_6_image = NDSV(image,'B2','B6');
+  var band_2_7_image = NDSV(image,'B2','B7');
+  var band_2_8_image = NDSV(image,'B2','B8');
+  var band_2_8A_image = NDSV(image,'B2','B8A');
+  var band_2_11_image = NDSV(image,'B2','B11');
+  var band_2_12_image = NDSV(image,'B2','B12');
+  
+  var band_3_4_image = NDSV(image,'B3','B4');
+  var band_3_5_image = NDSV(image,'B3','B5');
+  var band_3_6_image = NDSV(image,'B3','B6');
+  var band_3_7_image = NDSV(image,'B3','B7');
+  var band_3_8_image = NDSV(image,'B3','B8');
+  var band_3_8A_image = NDSV(image,'B3','B8A');
+  var band_3_11_image = NDSV(image,'B3','B11');
+  var band_3_12_image = NDSV(image,'B3','B12');
+  
+  var band_4_5_image = NDSV(image,'B4','B5');
+  var band_4_6_image = NDSV(image,'B4','B6');
+  var band_4_7_image = NDSV(image,'B4','B7');
+  var band_4_8_image = NDSV(image,'B4','B8');
+  var band_4_8A_image = NDSV(image,'B4','B8A');
+  var band_4_11_image = NDSV(image,'B4','B11');
+  var band_4_12_image = NDSV(image,'B4','B12');
+  
+  var band_5_6_image = NDSV(image,'B5','B6');
+  var band_5_7_image = NDSV(image,'B5','B7');
+  var band_5_8_image = NDSV(image,'B5','B8');
+  var band_5_8A_image = NDSV(image,'B5','B8A');
+  var band_5_11_image = NDSV(image,'B5','B11');
+  var band_5_12_image = NDSV(image,'B5','B12');
+  
+  var band_6_7_image = NDSV(image,'B6','B7');
+  var band_6_8_image = NDSV(image,'B6','B8');
+  var band_6_8A_image = NDSV(image,'B6','B8A');
+  var band_6_11_image = NDSV(image,'B6','B11');
+  var band_6_12_image = NDSV(image,'B6','B12');
+  
+  var band_7_8_image = NDSV(image,'B7','B8');
+  var band_7_8A_image = NDSV(image,'B7','B8A');
+  var band_7_11_image = NDSV(image,'B7','B11');
+  var band_7_12_image = NDSV(image,'B7','B12');
+  
+  var band_8_8A_image = NDSV(image,'B8','B8A');
+  var band_8_11_image = NDSV(image,'B8','B11');
+  var band_8_12_image = NDSV(image,'B8','B12');
+  
+  var band_8A_11_image = NDSV(image,'B8A','B11');
+  var band_8A_12_image = NDSV(image,'B8A','B12');
+  
+  var band_11_12_image = NDSV(image,'B11','B12');
+  
+  band_2_3_image = band_2_3_image.addBands(band_2_4_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_2_5_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_2_6_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_2_7_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_2_8_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_2_8A_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_2_11_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_2_12_image,null,false);
+  
+  band_2_3_image = band_2_3_image.addBands(band_3_4_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_5_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_6_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_7_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_8_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_8A_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_11_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_12_image,null,false);
+  
+  band_2_3_image = band_2_3_image.addBands(band_4_5_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_4_6_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_4_7_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_4_8_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_4_8A_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_4_11_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_4_12_image,null,false);
+  
+  band_2_3_image = band_2_3_image.addBands(band_5_6_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_5_7_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_5_8_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_5_8A_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_5_11_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_5_12_image,null,false);
+  
+  band_2_3_image = band_2_3_image.addBands(band_6_7_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_6_8_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_6_8A_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_6_11_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_6_12_image,null,false);
+  
+  band_2_3_image = band_2_3_image.addBands(band_7_8_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_7_8A_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_7_11_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_7_12_image,null,false);
+  
+  band_2_3_image = band_2_3_image.addBands(band_8_8A_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_8_11_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_8_12_image,null,false);
+  
+  band_2_3_image = band_2_3_image.addBands(band_8A_11_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_8A_12_image,null,false);
+  
+  band_2_3_image = band_2_3_image.addBands(band_11_12_image,null,false);
+  
+  var bandnames = ["ndsv_2_3", "ndsv_2_4", "ndsv_2_5", "ndsv_2_6", "ndsv_2_7", "ndsv_2_8", "ndsv_2_8A", "ndsv_2_11", "ndsv_2_12",
+                  "ndsv_3_4", "ndsv_3_5", "ndsv_3_6", "ndsv_3_7", "ndsv_3_8", "ndsv_3_8A", "ndsv_3_11", "ndsv_3_12",
+                  "ndsv_4_5", "ndsv_4_6", "ndsv_4_7", "ndsv_4_8", "ndsv_4_8A", "ndsv_4_11", "ndsv_4_12",
+                  "ndsv_5_6", "ndsv_5_7", "ndsv_5_8", "ndsv_5_8A", "ndsv_5_11", "ndsv_5_12",
+                  "ndsv_6_7", "ndsv_6_8", "ndsv_6_8A", "ndsv_6_11", "ndsv_6_12",
+                  "ndsv_7_8", "ndsv_7_8A", "ndsv_7_11", "ndsv_7_12",
+                  "ndsv_8_8A", "ndsv_8_11", "ndsv_8_12",
+                  "ndsv_8A_11", "ndsv_8A_12",
+                  "ndsv_11_12"];
+                  
+  var ndsv = band_2_3_image.select(['.*'], bandnames);
+  
+  return ndsv;
+
+}
+
+// Compute all the 10m bands of NDSV for Sentinel-2
+function create_ndsv_img_6_S2(image)
+{
+  image = image.float();
+  
+  var band_2_3_image = NDSV(image,'B2','B3');
+  var band_2_4_image = NDSV(image,'B2','B4');
+  var band_2_8_image = NDSV(image,'B2','B8');
+  
+  var band_3_4_image = NDSV(image,'B3','B4');
+  var band_3_8_image = NDSV(image,'B3','B8');
+  
+  var band_4_8_image = NDSV(image,'B4','B8');
+  
+  band_2_3_image = band_2_3_image.addBands(band_2_4_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_2_8_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_4_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_3_8_image,null,false);
+  band_2_3_image = band_2_3_image.addBands(band_4_8_image,null,false);
+  
+  var bandnames = ["ndsv_2_3", "ndsv_2_4", "ndsv_2_8",
+                  "ndsv_3_4", "ndsv_3_8",
+                  "ndsv_4_8"];
+                  
+  var ndsv = band_2_3_image.select(['.*'], bandnames);
+  
+  return ndsv;
+
+}
+
+// Compute all the bands of NDSV depending on the image
+function create_ndsv_img(image)
+{
+  if(sensor==='S2')
+    if (ndsv_feature_res == 10){
+      return create_ndsv_img_6_S2(image);
+    }
+    if (ndsv_feature_res == 20){
+      return create_ndsv_img_45_S2(image);
+    }
+}
+
+// ====================================== //
+/***             Classifier             ***/
+// ====================================== //
+
+// Generate training set of random points (Universe of cities)
+function ts_generator(poly, numPoints, selectedCities,seed)
+{
+  seed = (seed === undefined) ? 0 : seed;
+  var random_points = ee.FeatureCollection.randomPoints(poly, numPoints, seed);
+  
+  var geom = ee.Feature(selectedCities.geometry());
+  
+  var training_set = random_points.map(function (feature) {
+    return feature.set("Number",
+        ee.Algorithms.If(feature.containedIn(geom), 1, 0));
+  });
+  
+  var numPoints_NotUrban = training_set.filter(ee.Filter.eq("Number", 0)).size();
+  var numPoints_Urban = training_set.filter(ee.Filter.eq("Number", 1)).size();
+  var numPoints_toAdd = (numPoints_NotUrban.subtract(numPoints_Urban)).divide(2);
+  
+  random_points = ee.FeatureCollection.randomPoints(selectedCities, numPoints_toAdd);
+  var urban_points = random_points.map(function (feature) {
+        return feature.set("Number",1);
+  });
+
+  training_set = training_set.merge(urban_points);
+  
+  return training_set;
+  
+}
+
+// Select and create the fusion tables
+function training_selector(ft_array)
+{ 
+  var index;
+  var merge_ft = ft_array[0];
+  for (index = 1; index < ft_array.length; index++) 
+  {
+    merge_ft = merge_ft.merge(ft_array[index]);
+  }
+    
+  return merge_ft;
+}
+
+// Classification
+function classifier(img, ft, c, crs)
+{
+  crs = (crs === undefined) ? "EPSG:4326" : crs;
+  var training = img.sampleRegions( ft, ["Number"], null, 
+                                    ee.Projection(crs, [8.9831528411952135e-05, 0, -180, 0, -8.9831528411952135e-05, 90]));
+  var trained = c.train(training, "Number", img.bandNames());
+  
+  var classified = img.classify(trained);
+  
+  return classified;
+}
+
+// Choose classification type: single classifier (multi = false) or three and median (multi = true)
+function multi_classifier(img, ft, watermask, type)
+{
+  
+  var multiclass = false 
+  var name = multiclass===true ? classifier_array[type[0]] : ee.Classifier.cart();  
+  var water = ee.Image("MOD44W/MOD44W_005_2000_02_24").select(["water_mask"]);
+  var classified
+  
+  classified = classifier(img, ft, name);
+
+  if(watermask===true)
+  {
+    classified = classified.where(water,0);
+  }
+  
+  return classified;
+}
+
+function seed_generator(poly, numPoints, seed)
+{
+  seed = (seed === undefined) ? 0 : seed;
+  var random_points = ee.FeatureCollection.randomPoints(poly, numPoints, seed);
+
+  var training_set = random_points.map(function (feature) {
+    return feature.set("Number", 1)
+  });
+  
+  var sampledImg = training_set.reduceToImage({
+    properties: ['Number'],
+    reducer: ee.Reducer.first()
+  });
+
+  return sampledImg;
+}
+
+// Morphological operations
+function gci_opening(img, kernel_dr_open)
+{
+  var kernel_op = ee.Kernel.square({
+    radius: kernel_dr_open, units: 'meters', normalize: true
+  })
+  
+  // Perform an erosion followed by a dilation.
+  var opening = img
+             .focal_min({kernel: kernel_op, iterations: 1})
+             .focal_max({kernel: kernel_op, iterations: 1});
+             
+  return opening;
+}
+
+function gci_closing(img, kernel_dr_close)
+{
+  
+  // Define two kernels per closing e opening.
+  var kernel_cl = ee.Kernel.square({
+    radius: kernel_dr_close, units: 'meters', normalize: true
+  })
+  
+  // Perform a dilation followed by an erosion, display.
+  var closing = img
+             .focal_max({kernel: kernel_cl, iterations: 1})
+             .focal_min({kernel: kernel_cl, iterations: 1});
+  
+  return closing;
+}
+
+// Functions to convert from/to dB
+function toNatural(img) {
+  return ee.Image(10.0).pow(img.select(0).divide(10.0));
+}
+
+function toDB(img) {
+  return ee.Image(img).log10().multiply(10.0);
+}
+
+// The RL speckle filter
+function RefinedLee(img) {
+  // Set up 3x3 kernels 
+  var weights3 = ee.List.repeat(ee.List.repeat(1,3),3);
+  var kernel3 = ee.Kernel.fixed(3,3, weights3, 1, 1, false);
+
+  var mean3 = img.reduceNeighborhood(ee.Reducer.mean(), kernel3);
+  var variance3 = img.reduceNeighborhood(ee.Reducer.variance(), kernel3);
+
+  // Use a sample of the 3x3 windows inside a 7x7 windows to determine gradients and directions
+  var sample_weights = ee.List([[0,0,0,0,0,0,0], [0,1,0,1,0,1,0],[0,0,0,0,0,0,0], [0,1,0,1,0,1,0], [0,0,0,0,0,0,0], [0,1,0,1,0,1,0],[0,0,0,0,0,0,0]]);
+
+  var sample_kernel = ee.Kernel.fixed(7,7, sample_weights, 3,3, false);
+
+  // Calculate mean and variance for the sampled windows and store as 9 bands
+  var sample_mean = mean3.neighborhoodToBands(sample_kernel); 
+  var sample_var = variance3.neighborhoodToBands(sample_kernel);
+
+  // Determine the 4 gradients for the sampled windows
+  var gradients = sample_mean.select(1).subtract(sample_mean.select(7)).abs();
+  gradients = gradients.addBands(sample_mean.select(6).subtract(sample_mean.select(2)).abs());
+  gradients = gradients.addBands(sample_mean.select(3).subtract(sample_mean.select(5)).abs());
+  gradients = gradients.addBands(sample_mean.select(0).subtract(sample_mean.select(8)).abs());
+
+  // And find the maximum gradient amongst gradient bands
+  var max_gradient = gradients.reduce(ee.Reducer.max());
+
+  // Create a mask for band pixels that are the maximum gradient
+  var gradmask = gradients.eq(max_gradient);
+
+  // Duplicate gradmask bands: each gradient represents 2 directions
+  gradmask = gradmask.addBands(gradmask);
+
+  // Determine the 8 directions
+  var directions = sample_mean.select(1).subtract(sample_mean.select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(7))).multiply(1);
+  directions = directions.addBands(sample_mean.select(6).subtract(sample_mean.select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(2))).multiply(2));
+  directions = directions.addBands(sample_mean.select(3).subtract(sample_mean.select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(5))).multiply(3));
+  directions = directions.addBands(sample_mean.select(0).subtract(sample_mean.select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(8))).multiply(4));
+  // The next 4 are the not() of the previous 4
+  directions = directions.addBands(directions.select(0).not().multiply(5));
+  directions = directions.addBands(directions.select(1).not().multiply(6));
+  directions = directions.addBands(directions.select(2).not().multiply(7));
+  directions = directions.addBands(directions.select(3).not().multiply(8));
+
+  // Mask all values that are not 1-8
+  directions = directions.updateMask(gradmask);
+
+  // Collapse the stack into a singe band image (due to masking, each pixel has just one value (1-8) in it's directional band, and is otherwise masked)
+  directions = directions.reduce(ee.Reducer.sum());  
+  var sample_stats = sample_var.divide(sample_mean.multiply(sample_mean));
+
+  // Calculate localNoiseVariance
+  var sigmaV = sample_stats.toArray().arraySort().arraySlice(0,0,5).arrayReduce(ee.Reducer.mean(), [0]);
+
+  // Set up the 7*7 kernels for directional statistics
+  var rect_weights = ee.List.repeat(ee.List.repeat(0,7),3).cat(ee.List.repeat(ee.List.repeat(1,7),4));
+
+  var diag_weights = ee.List([[1,0,0,0,0,0,0], [1,1,0,0,0,0,0], [1,1,1,0,0,0,0], 
+    [1,1,1,1,0,0,0], [1,1,1,1,1,0,0], [1,1,1,1,1,1,0], [1,1,1,1,1,1,1]]);
+
+  var rect_kernel = ee.Kernel.fixed(7,7, rect_weights, 3, 3, false);
+  var diag_kernel = ee.Kernel.fixed(7,7, diag_weights, 3, 3, false);
+
+  // Create stacks for mean and variance using the original kernels. Mask with relevant direction.
+  var dir_mean = img.reduceNeighborhood(ee.Reducer.mean(), rect_kernel).updateMask(directions.eq(1));
+  var dir_var = img.reduceNeighborhood(ee.Reducer.variance(), rect_kernel).updateMask(directions.eq(1));
+
+  dir_mean = dir_mean.addBands(img.reduceNeighborhood(ee.Reducer.mean(), diag_kernel).updateMask(directions.eq(2)));
+  dir_var = dir_var.addBands(img.reduceNeighborhood(ee.Reducer.variance(), diag_kernel).updateMask(directions.eq(2)));
+
+  // and add the bands for rotated kernels
+  for (var i=1; i<4; i++) {
+    dir_mean = dir_mean.addBands(img.reduceNeighborhood(ee.Reducer.mean(), rect_kernel.rotate(i)).updateMask(directions.eq(2*i+1)));
+    dir_var = dir_var.addBands(img.reduceNeighborhood(ee.Reducer.variance(), rect_kernel.rotate(i)).updateMask(directions.eq(2*i+1)));
+    dir_mean = dir_mean.addBands(img.reduceNeighborhood(ee.Reducer.mean(), diag_kernel.rotate(i)).updateMask(directions.eq(2*i+2)));
+    dir_var = dir_var.addBands(img.reduceNeighborhood(ee.Reducer.variance(), diag_kernel.rotate(i)).updateMask(directions.eq(2*i+2)));
+  }
+
+  // Collapse the stack into a single band image (due to masking, each pixel has just one value in it's directional band, and is otherwise masked)
+  dir_mean = dir_mean.reduce(ee.Reducer.sum());
+  dir_var = dir_var.reduce(ee.Reducer.sum());
+
+  // A finally generate the filtered value
+  var varX = dir_var.subtract(dir_mean.multiply(dir_mean).multiply(sigmaV)).divide(sigmaV.add(1.0));
+  var b = varX.divide(dir_var);
+  var result = dir_mean.add(b.multiply(img.subtract(dir_mean)));
+  
+  return(result.arrayFlatten([['sum']]));
+}
+
+function toGamma0(image) {
+  return image.select(0).subtract(image.select('angle').multiply(Math.PI/180.0).cos().log10().multiply(10.0));
+}
+
+// ====================================== //
+/*** MAIN IMAGE CLASSIFICATION FUNCTION ***/
+// ====================================== //
+function image_classification(image_base, ft)
+{
+  // NDSV
+  var ndsv_img = create_ndsv_img(image_base);
+  
+  //Launch single or multi classification
+  var classified1 = multi_classifier(ndsv_img, ft, waterfilter, classifiers);
+
+  return classified1;
+
+}
+
+// ===================================== //
+/***            Main function           ***/
+// ===================================== //
+
+var rgb_viz = {min:0, max:3000, bands:['B4','B3','B2']};
+
+// Load the basic imagestart_date, end:_date
+var image_base = input_selector(start_date, end_date, polygon1);
+
+// Training set initilization 
+var ft = 0;
+
+// Generate training set
+ft = ts_generator(polygon1, num_points, selectedCities);
+
+// First classification
+var classified = image_classification(image_base, ft);
+
+// Autocenter map
+if(center_on === "")
+  autoCenterMap(polygon1, zoom);
+else
+  autoCenterMap(cities_table.filter(ee.Filter.eq('MAIN_CITY', center_on)).geometry(), zoom+4);
+
+// =======================================//
+// Create a mask for Sentinel-1 //
+// =======================================//
+
+var kernel_cls_open = 160; // Kernel size in meters to be used in "cleaning" the S-2 map
+var classified_morph = gci_opening(classified, kernel_cls_open);
+
+// =======================================//
+/***        Sentinel-1 Processing       ***/
+// =======================================//
+
+// Load the Sentinel-1 ImageCollection
+var collection =  ee.ImageCollection('COPERNICUS/S1_GRD')
+.filter(ee.Filter.eq('orbitProperties_pass', orbit))
+.filter(ee.Filter.listContains('transmitterReceiverPolarisation', polar))
+.filter(ee.Filter.eq('instrumentMode', 'IW'))
+.filterDate(S1_start_date, S1_end_date)
+.filterBounds(polygon1);
+
+
+// Reckon mean value along all the images
+if (lee_filter == 1)
+  {
+    var Mean = collection.map(toGamma0).map(toNatural).map(RefinedLee).map(toDB).mean();
+  }
+else
+  {
+    var Mean = collection.map(toGamma0).mean();
+  }
+
+// Mask the image using the S2 classification
+var s1_masked = Mean.updateMask(classified_morph); 
+
+var Threshold_pre = s1_masked.expression(
+    'B0 > Treshold', {
+    'B0': s1_masked.select(0),
+    'Treshold': treshold_dr
+});
+
+// Load the SRTM image
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Apply an algorithm to an image
+var slope = ee.Terrain.slope(srtm);
+
+// Treshold Slope 
+var slope_T = slope.expression(
+    'B0 > Treshold', {
+    'B0': slope.select(0),
+    'Treshold': treshold_slope
+});
+
+// Define a boxcar 
+var boxcar = ee.Kernel.square({
+  radius: kernel_dr, units: 'meters', normalize: true
+});
+
+// Perform a Data Range.
+var min = Mean.focal_min({kernel: boxcar, iterations: 1});
+var max = Mean.focal_max({kernel: boxcar, iterations: 1});
+
+var cost = max.subtract(min);
+
+// Compute the cumulative cost 
+var cumulativeCost = cost.cumulativeCost({
+  source: Threshold_pre, 
+  maxDistance: maxDistance_Cost 
+});
+
+var Threshold_WS = cumulativeCost.expression(
+    'B0 < Treshold', {
+    'B0': cumulativeCost.select(0),
+    'Treshold': treshold_ws
+});
+
+// Create a binary mask
+var mask_2 = slope_T.eq(0);
+
+// Mask mountains
+var Threshold_WS_Mask = Threshold_WS.updateMask(mask_2);
+
+// Define two kernels for closing and opening filtering
+var kernel_cl = ee.Kernel.square({
+  radius: kernel_dr_close, units: 'meters', normalize: true
+});
+
+var kernel_op = ee.Kernel.square({
+  radius: kernel_dr_open, units: 'meters', normalize: true
+});
+
+// Perform an erosion followed by a dilation
+var closing_sar = Threshold_WS_Mask
+             .focal_max({kernel: kernel_cl, iterations: 1})
+             .focal_min({kernel: kernel_cl, iterations: 1});
+             
+var opening_sar = closing_sar
+             .focal_min({kernel: kernel_op, iterations: 2})
+             .focal_max({kernel: kernel_op, iterations: 2});
+
+// Layers visualization
+Map.addLayer(image_base, rgb_viz, 'RGB (greenest pixel)');
+/*
+Map.addLayer(selectedCities, {color: '900000'}, 'Cities',false);
+Map.addLayer(ft, {color:"00ffff"}, 'Features Points', false);
+Map.addLayer(ee.Image(0).mask(classified), palette_list[0], 'Classified Mask '+ start_date, false);
+Map.addLayer(ee.Image(0).mask(classified_morph),palette_list[1], 'Classified Morph', false);
+Map.addLayer(Mean, {min:-30,max:0}, 'Mosaic', false);
+Map.addLayer(s1_masked, {min:-30,max:0}, 's1_masked', false);
+Map.addLayer(Threshold_pre,{min:0,max:1, palette: ['000000','FF0000']}, 'Threshold_pre', false);
+Map.addLayer(slope, {min: 0, max :30}, 'slope', false);
+Map.addLayer(cost,{min:0,max:30}, 'Cost - Data Range', false);
+Map.addLayer(cumulativeCost, {min: 0, max: 2000}, 'accumulated cost',false);
+Map.addLayer(Threshold_WS,{min:0,max:1}, 'Threshold WS', false);
+Map.addLayer(Threshold_WS_Mask,{min:0,max:1}, 'Threshold_WS_Mask',false);*/
+Map.addLayer(opening_sar,palette_list[0], 'Closing + Opening');
+
