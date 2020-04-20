@@ -1,35 +1,20 @@
+
 // ============================================================================================== //
 //      Urban extent extraction combining Sentinel data in the optical and microwave range        //
 // ============================================================================================== //
 
-var ROI = /* color: #d63000 */ee.Geometry.Polygon(
-        [[[-42.84042443392906, -23.081443899147512],
-          [-42.88437634569436, -22.518017522469133],
-          [-43.804585338184665, -22.564952753643794],
-          [-43.910342496959004, -23.14334124547527]]]),
-          
-shapes = ee.FeatureCollection("ft:1rYMVQMw3hTr8IC2d3Ad8nHzHmQy8iBJCqAN20l_O"),
-cities_table = ee.FeatureCollection("ft:1pQ-PrIEGrYa2Y3v9tsN1xwfYuqRIqOoDPARgpwzS"),
-countries = ee.FeatureCollection("ft:1tdSwUL7MVpOauSgRzqVTOwdfy17KDbw-1d9omPw");
+var ROI = /* color: #d63000 */geometry; // Draw a geometry in your area of interest
+
+var cities_table = table; // Universe-of-cities table
 
 // ====================================== //
 /***       Parameters to be set         ***/
 // ====================================== //
-var polygon_area = ROI;  //Region of interest
 
-var area = "South South America";     // The name of the region in "Global Shape" Fusion Table:
-                                      //   North America, Center South America, 
-                                      //   North South America, South South America,
-                                      //   Europe, North Africa, Center South Africa, 
-                                      //   Center Africa, Souht Africa Oceania
-                                      //   Russia Japan, Center Asia, India, South Est Asia
-                                      //   Indonesia, Indochina
+var polygon_area = ROI;  //Region of interest
 
 var country_name =  "Brazil";         // The name of selected country in Google "Countries of the World" table 
                                       // (set "" if you want to use the entire area instead of this country alone)
-
-var province_name = "";               // Select province of Indonesia or China
-                                      // (set "" if you want to use the entire Indonesia or China). Do not use for other countries!
 
 var start_date = "2016-04-22";        // S2 - Starting day of the collection
 var end_date = "2016-04-26";          // S2 - Ending day of the collection
@@ -42,8 +27,8 @@ var selectedCities = cities_table.filter(ee.Filter.eq('MAIN_CITY', 'Kunming')); 
                                                       ee.Filter.eq('MAIN_CITY', 'Yuxi'),
                                                       ee.Filter.eq('MAIN_CITY', 'Qujing')));*/
 
-var use_all_cities = true;            // Set true to use all the cities of the current provice 
-                                      // instead of the selected ones
+var use_all_cities = true;            // RECOMMENDED - Set true to use all the cities of the current provice 
+                                      // instead of the selected ones 
 
 var S1_start_date = '2016-01-01'      // S1 - Starting day of the collection
 var S1_end_date = '2017-01-01'        // S1 - Ending day of the collection
@@ -94,34 +79,6 @@ var kernel_dr_close = 30;             // In meters
 /***          Loading basic data        ***/
 // ====================================== //
 
-// LOAD POLYGONS
-// Find area in the world
-var shapes = ee.FeatureCollection("ft:1rYMVQMw3hTr8IC2d3Ad8nHzHmQy8iBJCqAN20l_O");
-var filter = shapes.filter(ee.Filter.eq('Area', area));
-
-// Find Countries in the world
-var countries = ee.FeatureCollection('ft:1tdSwUL7MVpOauSgRzqVTOwdfy17KDbw-1d9omPw');
-var country = countries.filter(ee.Filter.eq('Country', country_name));
-
-// Find provinces in the selected country
-var province = "";
-var provinces_table = "";
-if(country_name === "Indonesia")
-{
-  // Find province of Indonesia
-  provinces_table = ee.FeatureCollection('ft:1ep1h4bOMUOEg0jwjmmn78T-L32zLbILZotS2lwUC');
-  province = provinces_table.filter(ee.Filter.eq('name', province_name));
-}
-else if(country_name === "China")
-{
-  // Find Province of China
-  provinces_table = ee.FeatureCollection('ft:1h7DGU8yXMYqULLM3F4AsvLPOXiR5WTRswSgWLeHH');
-  province = provinces_table.filter(ee.Filter.eq('NAME_1', province_name));
-}
-
-// Load main polygon
-var polygon1 = polygon_area;
-
 // Classifier types
 var classifier_array = [ee.Classifier.naiveBayes(), ee.Classifier.gmoMaxEnt(), ee.Classifier.winnow(), 
                         ee.Classifier.perceptron(), ee.Classifier.pegasosLinear(),
@@ -137,7 +94,7 @@ if(use_all_cities === true)
   var allCities = cities_table.filter(ee.Filter.eq('COUNTRY', country_name));
   var allProvinceCities = allCities.map(function(f) {
       return f.set("Inside",
-          ee.Algorithms.If((f.geometry()).containedIn(polygon1), true, false));
+          ee.Algorithms.If((f.geometry()).containedIn(polygon_area), true, false));
   });
   selectedCities = allProvinceCities.filterMetadata('Inside', 'equals', true);
 }
@@ -612,20 +569,20 @@ function image_classification(image_base, ft)
 var rgb_viz = {min:0, max:3000, bands:['B4','B3','B2']};
 
 // Load the basic imagestart_date, end:_date
-var image_base = input_selector(start_date, end_date, polygon1);
+var image_base = input_selector(start_date, end_date, polygon_area);
 
 // Training set initilization 
 var ft = 0;
 
 // Generate training set
-ft = ts_generator(polygon1, num_points, selectedCities);
+ft = ts_generator(polygon_area, num_points, selectedCities);
 
 // First classification
 var classified = image_classification(image_base, ft);
 
 // Autocenter map
 if(center_on === "")
-  autoCenterMap(polygon1, zoom);
+  autoCenterMap(polygon_area, zoom);
 else
   autoCenterMap(cities_table.filter(ee.Filter.eq('MAIN_CITY', center_on)).geometry(), zoom+4);
 
@@ -646,7 +603,7 @@ var collection =  ee.ImageCollection('COPERNICUS/S1_GRD')
 .filter(ee.Filter.listContains('transmitterReceiverPolarisation', polar))
 .filter(ee.Filter.eq('instrumentMode', 'IW'))
 .filterDate(S1_start_date, S1_end_date)
-.filterBounds(polygon1);
+.filterBounds(polygon_area);
 
 
 // Reckon mean value along all the images
@@ -730,6 +687,7 @@ var opening_sar = closing_sar
 
 // Layers visualization
 Map.addLayer(image_base, rgb_viz, 'RGB (greenest pixel)');
+
 /*
 Map.addLayer(selectedCities, {color: '900000'}, 'Cities',false);
 Map.addLayer(ft, {color:"00ffff"}, 'Features Points', false);
@@ -744,4 +702,3 @@ Map.addLayer(cumulativeCost, {min: 0, max: 2000}, 'accumulated cost',false);
 Map.addLayer(Threshold_WS,{min:0,max:1}, 'Threshold WS', false);
 Map.addLayer(Threshold_WS_Mask,{min:0,max:1}, 'Threshold_WS_Mask',false);*/
 Map.addLayer(opening_sar,palette_list[0], 'Closing + Opening');
-
