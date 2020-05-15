@@ -14,7 +14,6 @@ var cities_table = table; // Universe-of-cities table
 var polygon_area = ROI;  //Region of interest
 
 var country_name =  "Brazil";         // The name of selected country in Google "Countries of the World" table 
-                                      // (set "" if you want to use the entire area instead of this country alone)
 
 var start_date = "2016-04-22";        // S2 - Starting day of the collection
 var end_date = "2016-04-26";          // S2 - Ending day of the collection
@@ -94,7 +93,7 @@ if(use_all_cities === true)
   var allCities = cities_table.filter(ee.Filter.eq('COUNTRY', country_name));
   var allProvinceCities = allCities.map(function(f) {
       return f.set("Inside",
-          ee.Algorithms.If((f.geometry()).containedIn(polygon_area), true, false));
+          ee.Algorithms.If((f.geometry()).containedIn(polygon_area, ee.ErrorMargin(10)), true, false));
   });
   selectedCities = allProvinceCities.filterMetadata('Inside', 'equals', true);
 }
